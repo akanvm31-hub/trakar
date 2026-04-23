@@ -2,20 +2,13 @@ import requests
 import json
 import time
 import schedule
-import smtplib
 import hashlib
 import os
 from datetime import datetime
-from bs4 import BeautifulSoup
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 CONFIG = {
     "TELEGRAM_TOKEN": "8720932052:AAEqm7Pn6JRtHIIyZukSw19YoEo0anZ9gSM",
     "TELEGRAM_CHAT_ID": "8779757061",
-    "EMAIL_FROM": "tonemail@gmail.com",
-    "EMAIL_PASSWORD": "ton_app_password",
-    "EMAIL_TO": "destination@email.com",
     "FILTRES": {
         "marque": "toyota",
         "modele": "prius+",
@@ -23,12 +16,9 @@ CONFIG = {
         "prix_min": 0,
         "km_max": 999999,
         "annee_min": 0,
-        "carburant": "hybride",
-        "localisation": "",
-        "rayon_km": 999,
     },
     "INTERVALLE_MINUTES": 5,
-    "SCORE_MIN": 70,
+    "SCORE_MIN": 60,
     "MAX_ANNONCES_PAR_SCAN": 20,
 }
 
@@ -44,32 +34,6 @@ def sauvegarder_vus(vus):
     with open(FICHIER_VUS, "w") as f:
         json.dump(list(vus), f)
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "fr-FR,fr;q=0.9",
-}
-
-SCRAPER_API_KEY = "3107bbb62b2150daf9b4a47336bbb939"
-
-def construire_url(filtres):
-    base = "https://www.leboncoin.fr/recherche"
-    params = {
-        "category": "2",
-        "text": f"{filtres['marque']} {filtres['modele']}".strip(),
-        "price": f"{filtres['prix_min']}-{filtres['prix_max']}",
-    }
-    query = "&".join(f"{k}={v}" for k, v in params.items() if v)
-    lbc_url = f"{base}?{query}"
-    return f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={lbc_url}&render=true"
-
-def extraire_prix(valeur):
-    if isinstance(valeur, (int, float)):
-        return int(valeur)
-    try:
-        return int("".join(filter(str.isdigit, str(valeur))))
-    except:
-        return 0
-
 def horodatage():
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
@@ -82,49 +46,135 @@ def envoyer_telegram(annonce, score):
         f"🚗 *{annonce['titre']}*\n"
         f"💰 Prix : *{annonce['prix']:,}€*\n"
         f"📍 Lieu : {annonce['localisation']}\n"
+        f"📅 Année : {annonce.get('annee', 'N/A')} | 🛣 {annonce.get('km', 'N/A')} km\n"
         f"🎯 Score : {score}/100\n\n"
         f"🔗 [Voir l'annonce]({annonce['url']})"
     )
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
-        print(f"[{horodatage()}] ✈️ Telegram envoyé : {annonce['titre']}")
+        resp = requests.post(url, json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}, timeout=10)
+        if resp.status_code == 200:
+            print(f"[{horodatage()}] ✈️ Telegram envoyé : {annonce['titre']}")
+        else:
+            print(f"[{horodatage()}] ❌ Telegram erreur : {resp.text}")
     except Exception as e:
-        print(f"[{horodatage()}] ❌ Telegram erreur : {e}")
+        print(f"[{horodatage()}] ❌ Telegram exception : {e}")
+
+def rechercher_annonces(filtres):
+    url = "https://api.leboncoin.fr/finder/search"
+    headers = {
+        "User-Agent": "LeBonCoin/5.0 (Android)",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "api_key": "ba0c2dad52b3565fd92a83e3599e9312",
+    }
+    payload = {
+        "filters": {
+            "category": {"id": "2"},
+            "enums": {
+                "fuel": ["hybrid"],
+            },
+            "keywords": {
+                "text": f"{filtres['marque']} {filtres['modele']}"
+            },
+            "ranges": {
+                "price": {
+                    "min": filtres["prix_min"],
+                    "max": filtres["prix_max"]
+                },
+                "mileage": {
+                    "max": filtres["km_max"]
+                }
+            }
+        },
+        "limit": filtres.get("MAX_ANNONCES_PAR_SCAN", 20),
+        "sort_by": "time",
+        "sort_order": "desc",
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("ads", [])
+        else:
+            print(f"[{horodatage()}] ❌ API LBC erreur {resp.status_code}")
+            return []
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ API LBC exception : {e}")
+        return []
+
+def parser_annonce(ad):
+    try:
+        titre = ad.get("subject", "")
+        prix = ad.get("price", [0])[0] if ad.get("price") else 0
+        url = ad.get("url", "")
+        localisation = ad.get("location", {}).get("city", "")
+        annonce_id = str(ad.get("list_id", hashlib.md5(url.encode()).hexdigest()[:12]))
+
+        # Attributs
+        attrs = {a["key"]: a.get("value_label", a.get("values_label", [""])[0]) 
+                 for a in ad.get("attributes", [])}
+        annee = attrs.get("regdate", "N/A")
+        km = attrs.get("mileage", "N/A")
+
+        return {
+            "id": annonce_id,
+            "titre": titre,
+            "prix": prix,
+            "url": url,
+            "localisation": localisation,
+            "annee": annee,
+            "km": km,
+        }
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ Parse erreur : {e}")
+        return None
+
+def calculer_score(annonce, filtres):
+    score = 50
+    prix = annonce["prix"]
+    if prix > 0:
+        if prix < filtres["prix_max"] * 0.7:
+            score += 35
+        elif prix < filtres["prix_max"] * 0.85:
+            score += 20
+        elif prix < filtres["prix_max"] * 0.95:
+            score += 10
+    if annonce["localisation"]:
+        score += 10
+    if annonce["titre"]:
+        score += 5
+    return min(max(score, 0), 100)
 
 def lancer_scan():
     print(f"\n[{horodatage()}] ━━━ Nouveau scan ━━━")
     filtres = CONFIG["FILTRES"]
     vus = charger_vus()
-    url = construire_url(filtres)
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=60)
-        soup = BeautifulSoup(resp.text, "html.parser")
-        cards = soup.select("article[data-qa-id='aditem_container']")
-        print(f"[{horodatage()}] 📋 {len(cards)} annonce(s) trouvée(s)")
-        for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
-            try:
-                titre_el = card.select_one("[data-qa-id='aditem_title']")
-                prix_el = card.select_one("[data-qa-id='aditem_price']")
-                loc_el = card.select_one("[data-qa-id='aditem_location']")
-                link_el = card.select_one("a")
-                titre = titre_el.text.strip() if titre_el else ""
-                prix = extraire_prix(prix_el.text if prix_el else "0")
-                loc = loc_el.text.strip() if loc_el else ""
-                url_annonce = "https://www.leboncoin.fr" + link_el["href"] if link_el else ""
-                annonce_id = hashlib.md5(url_annonce.encode()).hexdigest()[:12]
-                if annonce_id in vus:
-                    continue
-                annonce = {"titre": titre, "prix": prix, "localisation": loc, "url": url_annonce}
-                score = min(max(50 + (30 if prix < 12000 else 0) + (10 if loc else 0), 0), 100)
-                if score >= CONFIG["SCORE_MIN"]:
-                    envoyer_telegram(annonce, score)
-                vus.add(annonce_id)
-            except:
-                continue
-    except Exception as e:
-        print(f"[{horodatage()}] ❌ Erreur : {e}")
+    nouvelles = 0
+
+    ads = rechercher_annonces(filtres)
+    print(f"[{horodatage()}] 📋 {len(ads)} annonce(s) trouvée(s)")
+
+    for ad in ads[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
+        annonce = parser_annonce(ad)
+        if not annonce:
+            continue
+
+        if annonce["id"] in vus:
+            continue
+
+        score = calculer_score(annonce, filtres)
+        print(f"[{horodatage()}] 🎯 Score {score}/100 — {annonce['titre']} — {annonce['prix']}€")
+
+        if score >= CONFIG["SCORE_MIN"]:
+            envoyer_telegram(annonce, score)
+            nouvelles += 1
+
+        vus.add(annonce["id"])
+
     sauvegarder_vus(vus)
+    print(f"[{horodatage()}] ✅ Scan terminé — {nouvelles} alerte(s) envoyée(s)")
 
 def demarrer():
     print("🚗 TRAKAR — Bot démarré")
