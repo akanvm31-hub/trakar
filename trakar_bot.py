@@ -5,20 +5,21 @@ import schedule
 import hashlib
 import os
 from datetime import datetime
+from bs4 import BeautifulSoup
 
 CONFIG = {
     "TELEGRAM_TOKEN": "8720932052:AAEqm7Pn6JRtHIIyZukSw19YoEo0anZ9gSM",
     "TELEGRAM_CHAT_ID": "8779757061",
     "FILTRES": {
         "marque": "toyota",
-        "modele": "prius+",
+        "modele": "prius",
         "prix_max": 15000,
         "prix_min": 0,
         "km_max": 999999,
         "annee_min": 0,
     },
     "INTERVALLE_MINUTES": 5,
-    "SCORE_MIN": 60,
+    "SCORE_MIN": 55,
     "MAX_ANNONCES_PAR_SCAN": 20,
 }
 
@@ -41,12 +42,14 @@ def envoyer_telegram(annonce, score):
     token = CONFIG["TELEGRAM_TOKEN"]
     chat_id = CONFIG["TELEGRAM_CHAT_ID"]
     emoji = "🔥" if score >= 85 else "✅"
+    source = annonce.get("source", "")
     message = (
         f"{emoji} *Nouvelle alerte Trakar !*\n\n"
         f"🚗 *{annonce['titre']}*\n"
         f"💰 Prix : *{annonce['prix']:,}€*\n"
         f"📍 Lieu : {annonce['localisation']}\n"
         f"📅 Année : {annonce.get('annee', 'N/A')} | 🛣 {annonce.get('km', 'N/A')} km\n"
+        f"🌐 Source : {source}\n"
         f"🎯 Score : {score}/100\n\n"
         f"🔗 [Voir l'annonce]({annonce['url']})"
     )
@@ -60,79 +63,187 @@ def envoyer_telegram(annonce, score):
     except Exception as e:
         print(f"[{horodatage()}] ❌ Telegram exception : {e}")
 
-def rechercher_annonces(filtres):
-    url = "https://api.leboncoin.fr/finder/search"
-    headers = {
-        "User-Agent": "LeBonCoin/5.0 (Android)",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "api_key": "ba0c2dad52b3565fd92a83e3599e9312",
-    }
-    payload = {
-        "filters": {
-            "category": {"id": "2"},
-            "enums": {
-                "fuel": ["hybrid"],
-            },
-            "keywords": {
-                "text": f"{filtres['marque']} {filtres['modele']}"
-            },
-            "ranges": {
-                "price": {
-                    "min": filtres["prix_min"],
-                    "max": filtres["prix_max"]
-                },
-                "mileage": {
-                    "max": filtres["km_max"]
-                }
-            }
-        },
-        "limit": filtres.get("MAX_ANNONCES_PAR_SCAN", 20),
-        "sort_by": "time",
-        "sort_order": "desc",
-    }
-
+# ══════════════════════════════════════════════════════
+# LA CENTRALE
+# ══════════════════════════════════════════════════════
+def scraper_lacentrale(filtres):
+    annonces = []
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("ads", [])
-        else:
-            print(f"[{horodatage()}] ❌ API LBC erreur {resp.status_code}")
-            return []
-    except Exception as e:
-        print(f"[{horodatage()}] ❌ API LBC exception : {e}")
-        return []
+        marque = filtres["marque"].upper()
+        modele = filtres["modele"].replace("+", "-plus")
+        prix_max = filtres["prix_max"]
+        url = f"https://www.lacentrale.fr/listing?makesModelsCommercialNames={marque}%3A{modele}&priceMax={prix_max}&options=&page=1"
 
-def parser_annonce(ad):
-    try:
-        titre = ad.get("subject", "")
-        prix = ad.get("price", [0])[0] if ad.get("price") else 0
-        url = ad.get("url", "")
-        localisation = ad.get("location", {}).get("city", "")
-        annonce_id = str(ad.get("list_id", hashlib.md5(url.encode()).hexdigest()[:12]))
-
-        # Attributs
-        attrs = {a["key"]: a.get("value_label", a.get("values_label", [""])[0]) 
-                 for a in ad.get("attributes", [])}
-        annee = attrs.get("regdate", "N/A")
-        km = attrs.get("mileage", "N/A")
-
-        return {
-            "id": annonce_id,
-            "titre": titre,
-            "prix": prix,
-            "url": url,
-            "localisation": localisation,
-            "annee": annee,
-            "km": km,
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "fr-FR,fr;q=0.9",
         }
-    except Exception as e:
-        print(f"[{horodatage()}] ❌ Parse erreur : {e}")
-        return None
 
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 La Centrale status : {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        cards = soup.select("div[class*='searchCard']") or \
+                soup.select("article[class*='vehicle']") or \
+                soup.select("div[class*='vehicleCard']") or \
+                soup.select("a[href*='/voiture-occasion']")
+
+        print(f"[{horodatage()}] 📋 La Centrale : {len(cards)} carte(s)")
+
+        for card in cards[:filtres.get("MAX_ANNONCES_PAR_SCAN", 20)]:
+            try:
+                titre = card.get_text(separator=" ", strip=True)[:80]
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
+                if not href:
+                    continue
+                url_annonce = href if href.startswith("http") else "https://www.lacentrale.fr" + href
+                annonce_id = "lc_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce La Centrale",
+                    "prix": 0,
+                    "url": url_annonce,
+                    "localisation": "France",
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "La Centrale"
+                })
+            except:
+                continue
+
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ La Centrale erreur : {e}")
+
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# AUTOSCOUT24
+# ══════════════════════════════════════════════════════
+def scraper_autoscout(filtres):
+    annonces = []
+    try:
+        marque = filtres["marque"].lower()
+        modele = filtres["modele"].lower().replace("+", "%2B")
+        prix_max = filtres["prix_max"]
+        url = f"https://www.autoscout24.fr/lst/{marque}/{modele}?sort=age&desc=1&priceto={prix_max}&ustate=N%2CU&size=20&page=1&fuelc=H"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
+
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 AutoScout24 status : {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        cards = soup.select("article[class*='cldt-summary']") or \
+                soup.select("div[class*='ListItem']") or \
+                soup.select("article") or \
+                soup.select("a[href*='/annonces/']")
+
+        print(f"[{horodatage()}] 📋 AutoScout24 : {len(cards)} carte(s)")
+
+        for card in cards[:filtres.get("MAX_ANNONCES_PAR_SCAN", 20)]:
+            try:
+                titre_el = card.select_one("h2") or card.select_one("h1") or card.select_one("[class*='title']")
+                titre = titre_el.get_text(strip=True) if titre_el else card.get_text(separator=" ", strip=True)[:60]
+
+                prix_el = card.select_one("[class*='price']") or card.select_one("[data-testid*='price']")
+                prix_txt = prix_el.get_text(strip=True) if prix_el else "0"
+                prix = int("".join(filter(str.isdigit, prix_txt))) if any(c.isdigit() for c in prix_txt) else 0
+
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
+                if not href:
+                    continue
+                url_annonce = href if href.startswith("http") else "https://www.autoscout24.fr" + href
+
+                loc_el = card.select_one("[class*='location']") or card.select_one("[class*='seller']")
+                loc = loc_el.get_text(strip=True) if loc_el else "France"
+
+                annonce_id = "as_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+
+                if prix > filtres["prix_max"] and prix > 0:
+                    continue
+
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce AutoScout24",
+                    "prix": prix,
+                    "url": url_annonce,
+                    "localisation": loc[:40],
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "AutoScout24"
+                })
+            except:
+                continue
+
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ AutoScout24 erreur : {e}")
+
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# PARUVENDU
+# ══════════════════════════════════════════════════════
+def scraper_paruvendu(filtres):
+    annonces = []
+    try:
+        marque = filtres["marque"].lower()
+        modele = filtres["modele"].lower().replace("+", "-plus")
+        prix_max = filtres["prix_max"]
+        url = f"https://www.paruvendu.fr/auto-moto-bateau/voiture/{marque}/{modele}/?px2={prix_max}"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
+
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 ParuVendu status : {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        cards = soup.select("div[class*='annonce']") or \
+                soup.select("article") or \
+                soup.select("a[href*='/voiture/']")
+
+        print(f"[{horodatage()}] 📋 ParuVendu : {len(cards)} carte(s)")
+
+        for card in cards[:10]:
+            try:
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
+                if not href or "voiture" not in href:
+                    continue
+                url_annonce = href if href.startswith("http") else "https://www.paruvendu.fr" + href
+                titre = card.get_text(separator=" ", strip=True)[:70]
+                annonce_id = "pv_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce ParuVendu",
+                    "prix": 0,
+                    "url": url_annonce,
+                    "localisation": "France",
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "ParuVendu"
+                })
+            except:
+                continue
+
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ ParuVendu erreur : {e}")
+
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# SCORE
+# ══════════════════════════════════════════════════════
 def calculer_score(annonce, filtres):
-    score = 50
+    score = 55
     prix = annonce["prix"]
     if prix > 0:
         if prix < filtres["prix_max"] * 0.7:
@@ -141,31 +252,36 @@ def calculer_score(annonce, filtres):
             score += 20
         elif prix < filtres["prix_max"] * 0.95:
             score += 10
-    if annonce["localisation"]:
-        score += 10
-    if annonce["titre"]:
+    else:
+        score += 15  # prix inconnu = on alerte quand même
+    if annonce["localisation"] and annonce["localisation"] != "France":
+        score += 5
+    if annonce["titre"] and len(annonce["titre"]) > 10:
         score += 5
     return min(max(score, 0), 100)
 
+# ══════════════════════════════════════════════════════
+# SCAN PRINCIPAL
+# ══════════════════════════════════════════════════════
 def lancer_scan():
     print(f"\n[{horodatage()}] ━━━ Nouveau scan ━━━")
     filtres = CONFIG["FILTRES"]
     vus = charger_vus()
     nouvelles = 0
 
-    ads = rechercher_annonces(filtres)
-    print(f"[{horodatage()}] 📋 {len(ads)} annonce(s) trouvée(s)")
+    toutes_annonces = []
+    toutes_annonces += scraper_lacentrale(filtres)
+    toutes_annonces += scraper_autoscout(filtres)
+    toutes_annonces += scraper_paruvendu(filtres)
 
-    for ad in ads[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
-        annonce = parser_annonce(ad)
-        if not annonce:
-            continue
+    print(f"[{horodatage()}] 📊 Total : {len(toutes_annonces)} annonce(s) sur tous les sites")
 
+    for annonce in toutes_annonces:
         if annonce["id"] in vus:
             continue
 
         score = calculer_score(annonce, filtres)
-        print(f"[{horodatage()}] 🎯 Score {score}/100 — {annonce['titre']} — {annonce['prix']}€")
+        print(f"[{horodatage()}] 🎯 {score}/100 — {annonce['titre'][:40]} — {annonce['source']}")
 
         if score >= CONFIG["SCORE_MIN"]:
             envoyer_telegram(annonce, score)
@@ -177,7 +293,7 @@ def lancer_scan():
     print(f"[{horodatage()}] ✅ Scan terminé — {nouvelles} alerte(s) envoyée(s)")
 
 def demarrer():
-    print("🚗 TRAKAR — Bot démarré")
+    print("🚗 TRAKAR — Bot démarré (La Centrale + AutoScout24 + ParuVendu)")
     lancer_scan()
     schedule.every(CONFIG["INTERVALLE_MINUTES"]).minutes.do(lancer_scan)
     while True:
