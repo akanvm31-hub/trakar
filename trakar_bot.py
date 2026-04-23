@@ -19,7 +19,7 @@ CONFIG = {
         "annee_min": 0,
     },
     "INTERVALLE_MINUTES": 5,
-    "SCORE_MIN": 55,
+    "SCORE_MIN": 0,
     "MAX_ANNONCES_PAR_SCAN": 20,
 }
 
