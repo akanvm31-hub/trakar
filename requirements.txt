@@ -1,4 +1,4 @@
+python-telegram-bot
+feedparser
 requests
-beautifulsoup4
-schedule
-scraperapi-sdk
+
