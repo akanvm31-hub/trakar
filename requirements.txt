@@ -1,3 +1,5 @@
-python-telegram-bot==13.15
-feedparser
 requests
+beautifulsoup4
+schedule
+scraperapi-sdk
+
