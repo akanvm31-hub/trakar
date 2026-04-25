@@ -1,230 +1,121 @@
 import requests
-from bs4 import BeautifulSoup
 import time
-import json
-from datetime import datetime
 
-# ============================================
-# CONFIGURATION
-# ============================================
-TELEGRAM_TOKEN = "TON_TOKEN_ICI"
-TELEGRAM_CHAT_ID = "TON_CHAT_ID_ICI"
+TOKEN = "8720932052:AAEqm7Pn6JRtHIIyZukSw19YoEo0anZ9gSM"
+CHAT_ID = "8779757061"
 
-RECHERCHES = [
-    {
-        "nom": "Toyota Camry pas cher LA",
-        "ville": "losangeles",
-        "marque": "toyota camry",
-        "prix_max": 8000,
-        "prix_min": 1000,
-        "annee_min": 2010,
-    },
-    {
-        "nom": "Honda Civic LA",
-        "ville": "losangeles",
-        "marque": "honda civic",
-        "prix_max": 7000,
-        "prix_min": 1000,
-        "annee_min": 2010,
-    },
-]
-
-INTERVALLE_SECONDES = 300
+FILTRES = {
+    "marque": "toyota",
+    "modele": "yaris",
+    "prix_max": 12000,
+    "prix_min": 0,
+    "km_max": 90000,
+    "annee_min": 2018,
+}
 
 annonces_vues = set()
 
-# ============================================
-# SAUVEGARDE
-# ============================================
-def charger_annonces_vues():
+def envoyer_telegram(annonce, score):
+    emoji = "🔥" if score >= 85 else "✅"
+    vendeur = "👤 Particulier" if not annonce.get("pro") else "🏢 Professionnel"
+    message = (
+        f"{emoji} *Nouvelle alerte Trakar !*\n\n"
+        f"🚗 *{annonce['titre']}*\n"
+        f"💰 Prix : *{annonce['prix']:,}€*\n"
+        f"📍 Lieu : {annonce['localisation']}\n"
+        f"📅 Année : {annonce.get('annee', 'N/A')} | 🛣 {annonce.get('km', 'N/A')} km\n"
+        f"🌐 Source : {annonce.get('source', '')}\n"
+        f"👤 Vendeur : {vendeur}\n"
+        f"🎯 Score : {score}/100\n\n"
+        f"🔗 [Voir l'annonce]({annonce['url']})"
+    )
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
     try:
-        with open("annonces_vues.json", "r") as f:
-            return set(json.load(f))
-    except:
-        return set()
-
-def sauvegarder_annonces_vues():
-    with open("annonces_vues.json", "w") as f:
-        json.dump(list(annonces_vues), f)
-
-# ============================================
-# TELEGRAM
-# ============================================
-def envoyer_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
-    try:
-        requests.post(url, data=data, timeout=10)
-        print("✅ Message Telegram envoyé")
+        r = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": False
+        })
+        if r.status_code == 200:
+            print("✅ Message Telegram envoyé")
+        else:
+            print(f"❌ Erreur Telegram : {r.status_code} - {r.text}")
     except Exception as e:
-        print(f"❌ Erreur Telegram : {e}")
+        print(f"❌ Exception Telegram : {e}")
 
-# ============================================
-# SCRAPING
-# ============================================
-def scraper_craigslist(recherche):
-    ville = recherche["ville"]
-    url = f"https://{ville}.craigslist.org/search/cta"
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    params = {
-        "auto_make_model": recherche["marque"],
-        "max_price": recherche["prix_max"],
-        "min_price": recherche["prix_min"],
-        "auto_year_min": recherche.get("annee_min", 2005),
-        "sort": "date",
-    }
-
+def scraper_autoscout(filtres):
+    annonces = []
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        print(f"📡 Status: {response.status_code} pour {recherche['nom']}")
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        resultats = []
-
-        # Méthode 1 - result-row
-        annonces = soup.find_all("li", class_=lambda c: c and "result-row" in c)
-        print(f"📋 Méthode 1 (result-row) : {len(annonces)}")
-
-        # Méthode 2 - cl-search-result
-        if not annonces:
-            annonces = soup.select("li.cl-search-result")
-            print(f"📋 Méthode 2 (cl-search-result) : {len(annonces)}")
-
-        # Méthode 3 - cl-static-search-result
-        if not annonces:
-            annonces = soup.select(".cl-static-search-result")
-            print(f"📋 Méthode 3 (cl-static-search-result) : {len(annonces)}")
-
-        # Méthode 4 - liens /cto/
-        if not annonces:
-            liens = soup.find_all("a", href=lambda h: h and "/cto/" in h)
-            print(f"📋 Méthode 4 (liens /cto/) : {len(liens)}")
-            for lien_tag in liens:
-                titre = lien_tag.get_text(strip=True)
-                lien = lien_tag.get("href", "")
-                if titre and lien:
-                    resultats.append({
-                        "titre": titre,
-                        "prix": "Non précisé",
-                        "lien": lien,
-                        "lieu": "Los Angeles",
-                    })
-            return resultats
-
-        # Traitement des annonces trouvées
-        for annonce in annonces:
+        url = "https://www.autoscout24.fr/lst"
+        params = {
+            "make": filtres["marque"],
+            "model": filtres["modele"],
+            "priceto": filtres["prix_max"],
+            "mileageto": filtres["km_max"],
+            "fregfrom": filtres.get("annee_min", 2018),
+            "cy": "F",
+            "atype": "C",
+            "results_per_page": 20,
+        }
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        print(f"🔍 AutoScout24 status : {r.status_code}")
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.select("[data-testid='regular-article-container']")
+        print(f"📋 AutoScout24 : {len(cards)} annonces trouvées")
+        for card in cards:
             try:
-                lien_tag = annonce.find("a")
-                if not lien_tag:
-                    continue
-
-                titre = lien_tag.get_text(strip=True)
-                lien = lien_tag.get("href", "")
-
-                prix_tag = annonce.find(class_=lambda c: c and "price" in str(c).lower())
-                prix = prix_tag.get_text(strip=True) if prix_tag else "Non précisé"
-
-                lieu_tag = annonce.find(class_=lambda c: c and (
-                    "hood" in str(c) or "location" in str(c) or "meta" in str(c)
-                ))
-                lieu = lieu_tag.get_text(strip=True) if lieu_tag else "Non précisé"
-
-                resultats.append({
+                titre = card.select_one("h2").text.strip()
+                prix_txt = card.select_one("[data-testid='price-label']").text.strip()
+                prix = int(''.join(filter(str.isdigit, prix_txt)))
+                lien = "https://www.autoscout24.fr" + card.select_one("a")["href"]
+                annonces.append({
                     "titre": titre,
                     "prix": prix,
-                    "lien": lien,
-                    "lieu": lieu,
+                    "localisation": "France",
+                    "km": filtres["km_max"],
+                    "annee": filtres.get("annee_min", 2018),
+                    "url": lien,
+                    "source": "AutoScout24",
+                    "pro": False,
                 })
-
-            except Exception as e:
+            except:
                 continue
-
-        print(f"🔎 Total annonces extraites : {len(resultats)}")
-        return resultats
-
     except Exception as e:
-        print(f"❌ Erreur scraping : {e}")
-        return []
+        print(f"❌ AutoScout24 erreur : {e}")
+    return annonces
 
-# ============================================
-# ALERTES
-# ============================================
-def analyser_et_alerter(annonces, recherche):
-    nouvelles = 0
+def calculer_score(annonce, filtres):
+    score = 50
+    if annonce["prix"] <= filtres["prix_max"] * 0.8:
+        score += 20
+    elif annonce["prix"] <= filtres["prix_max"] * 0.9:
+        score += 10
+    if annonce.get("km", 99999) <= 50000:
+        score += 20
+    elif annonce.get("km", 99999) <= 70000:
+        score += 10
+    if not annonce.get("pro"):
+        score += 10
+    return min(score, 100)
 
-    for annonce in annonces:
-        lien = annonce["lien"]
-        if lien in annonces_vues:
-            continue
-
-        annonces_vues.add(lien)
-        nouvelles += 1
-
-        message = (
-            f"🚗 <b>NOUVELLE ANNONCE</b>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"📌 <b>{annonce['titre']}</b>\n"
-            f"💰 <b>{annonce['prix']}</b>\n"
-            f"📍 {annonce['lieu']}\n"
-            f"🔗 <a href='{annonce['lien']}'>Voir l'annonce</a>\n"
-            f"━━━━━━━━━━━━━━━━\n"
-            f"🔎 Recherche : {recherche['nom']}"
-        )
-
-        envoyer_telegram(message)
-        time.sleep(1)
-
-    return nouvelles
-
-# ============================================
-# BOUCLE PRINCIPALE
-# ============================================
 def main():
-    global annonces_vues
-    annonces_vues = charger_annonces_vues()
-
-    print("🚀 Bot Craigslist démarré !")
-    print(f"🔍 {len(RECHERCHES)} recherche(s) configurée(s)")
-    print(f"⏱️ Intervalle : {INTERVALLE_SECONDES} secondes\n")
-
-    envoyer_telegram(
-        "🚀 <b>Bot Craigslist démarré !</b>\n"
-        f"🔍 {len(RECHERCHES)} recherche(s) active(s)\n"
-        f"⏱️ Vérification toutes les {INTERVALLE_SECONDES // 60} minutes"
-    )
-
+    print("✅ Bot Trakar démarré")
     while True:
-        print(f"\n⏰ [{datetime.now().strftime('%H:%M:%S')}] Nouvelle vérification...")
-        total_nouvelles = 0
-
-        for recherche in RECHERCHES:
-            print(f"\n🔎 Recherche : {recherche['nom']}")
-            annonces = scraper_craigslist(recherche)
-
-            if annonces:
-                nouvelles = analyser_et_alerter(annonces, recherche)
-                total_nouvelles += nouvelles
-                print(f"✅ {nouvelles} nouvelle(s) annonce(s)")
-            else:
-                print("⚠️ Aucune annonce récupérée")
-
-            time.sleep(5)
-
-        sauvegarder_annonces_vues()
-        print(f"\n💾 Sauvegarde — {total_nouvelles} nouvelle(s) au total")
-        print(f"⏳ Prochaine vérification dans {INTERVALLE_SECONDES // 60} minutes...")
-        time.sleep(INTERVALLE_SECONDES)
+        try:
+            annonces = scraper_autoscout(FILTRES)
+            for a in annonces:
+                if a["url"] not in annonces_vues:
+                    annonces_vues.add(a["url"])
+                    score = calculer_score(a, FILTRES)
+                    envoyer_telegram(a, score)
+                    time.sleep(2)
+        except Exception as e:
+            print(f"[ERREUR] {e}")
+        print("⏳ Pause 30 min...")
+        time.sleep(1800)
 
 if __name__ == "__main__":
     main()
