@@ -4,11 +4,12 @@ import time
 import schedule
 import hashlib
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
+import re
 
 # ══════════════════════════════════════════════════════
-# CONFIGURATION
+# CLIENTS
 # ══════════════════════════════════════════════════════
 CLIENTS = [
     {
@@ -28,18 +29,17 @@ CLIENTS = [
 
 CONFIG = {
     "INTERVALLE_MINUTES": 5,
-    "SCORE_MIN": 0,
+    "SCORE_MIN": 60,
     "MAX_ANNONCES_PAR_SCAN": 20,
+    "MAX_AGE_HEURES": 24,  # On ignore les annonces de plus de 24h
 }
 
 FICHIER_VUS = "trakar_vus.json"
 
-MOTS_PRO = ["garage", "concessionnaire", "mandataire", "auto pro", "automobiles",
+# Mots qui indiquent un vendeur professionnel → on pénalise
+MOTS_PRO = ["garage", "concessionnaire", "mandataire", "auto pro", "automobiles", 
             "sas", "sarl", "sa ", "dealer", "group", "distribution"]
 
-# ══════════════════════════════════════════════════════
-# UTILITAIRES
-# ══════════════════════════════════════════════════════
 def charger_vus():
     if os.path.exists(FICHIER_VUS):
         with open(FICHIER_VUS, "r") as f:
@@ -54,20 +54,17 @@ def horodatage():
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def est_vendeur_pro(titre, localisation):
+    """Détecte si l'annonce vient d'un professionnel."""
     texte = (titre + " " + localisation).lower()
     return any(mot in texte for mot in MOTS_PRO)
 
-# ══════════════════════════════════════════════════════
-# TELEGRAM
-# ══════════════════════════════════════════════════════
 def envoyer_telegram(annonce, score, token, chat_id):
     emoji = "🔥" if score >= 85 else "✅"
     vendeur = "👤 Particulier" if not annonce.get("pro") else "🏢 Professionnel"
-    prix_affiche = f"{annonce['prix']:,}€" if annonce['prix'] > 0 else "Non renseigné"
     message = (
         f"{emoji} *Nouvelle alerte Trakar !*\n\n"
         f"🚗 *{annonce['titre']}*\n"
-        f"💰 Prix : *{prix_affiche}*\n"
+        f"💰 Prix : *{annonce['prix']:,}€*\n"
         f"📍 Lieu : {annonce['localisation']}\n"
         f"📅 Année : {annonce.get('annee', 'N/A')} | 🛣 {annonce.get('km', 'N/A')} km\n"
         f"🌐 Source : {annonce.get('source', '')}\n"
@@ -86,231 +83,275 @@ def envoyer_telegram(annonce, score, token, chat_id):
         print(f"[{horodatage()}] ❌ Telegram exception : {e}")
 
 # ══════════════════════════════════════════════════════
-# LEBONCOIN
-# ══════════════════════════════════════════════════════
-def scraper_leboncoin(filtres):
-    annonces = []
-    try:
-        marque = filtres["marque"]
-        modele = filtres["modele"]
-        prix_max = filtres["prix_max"]
-        prix_min = filtres.get("prix_min", 0)
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "fr-FR,fr;q=0.9",
-            "Referer": "https://www.leboncoin.fr/",
-            "Content-Type": "application/json",
-            "api_key": "ba0c2dad52b3565c9a5143b30b3c0e95",
-        }
-
-        payload = {
-            "filters": {
-                "category": {"id": "2"},
-                "enums": {"ad_type": ["offer"]},
-                "keywords": {"text": f"{marque} {modele}"},
-                "ranges": {
-                    "price": {"min": prix_min, "max": prix_max}
-                }
-            },
-            "limit": 20,
-            "sort_by": "time",
-            "sort_order": "desc",
-        }
-
-        resp = requests.post(
-            "https://api.leboncoin.fr/api/adfinder/v1/search",
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-
-        print(f"[{horodatage()}] 🌐 LeBonCoin status : {resp.status_code}")
-
-        if resp.status_code != 200:
-            print(f"[{horodatage()}] ⚠️ LeBonCoin : échec ({resp.status_code})")
-            return annonces
-
-        data = resp.json()
-        ads = data.get("ads", [])
-        print(f"[{horodatage()}] 📋 LeBonCoin : {len(ads)} annonce(s)")
-
-        for ad in ads:
-            try:
-                titre = ad.get("subject", "Annonce")
-                prix_list = ad.get("price", [0])
-                prix = prix_list[0] if isinstance(prix_list, list) and prix_list else 0
-                url_annonce = "https://www.leboncoin.fr" + ad.get("url", "")
-                loc = ad.get("location", {})
-                localisation = f"{loc.get('city', '')} ({loc.get('zipcode', '')})"
-                annonce_id = "lbc_" + str(ad.get("list_id", hashlib.md5(url_annonce.encode()).hexdigest()[:10]))
-                attrs = {a["key"]: a.get("value_label", a.get("value", "")) for a in ad.get("attributes", [])}
-
-                annonces.append({
-                    "id": annonce_id,
-                    "titre": titre,
-                    "prix": prix,
-                    "url": url_annonce,
-                    "localisation": localisation,
-                    "annee": attrs.get("regdate", "N/A"),
-                    "km": attrs.get("mileage", "N/A"),
-                    "source": "LeBonCoin",
-                    "pro": ad.get("owner", {}).get("type", "") == "pro",
-                })
-            except:
-                continue
-
-    except Exception as e:
-        print(f"[{horodatage()}] ❌ LeBonCoin erreur : {e}")
-    return annonces
-
-# ══════════════════════════════════════════════════════
-# LACENTRALE
+# LA CENTRALE — triée par date, particuliers en priorité
 # ══════════════════════════════════════════════════════
 def scraper_lacentrale(filtres):
     annonces = []
     try:
         marque = filtres["marque"].upper()
-        modele = filtres["modele"].upper()
+        modele = filtres["modele"].replace("+", "-plus")
         prix_max = filtres["prix_max"]
         prix_min = filtres.get("prix_min", 0)
-
+        # Tri par date + filtre particuliers
+        url = f"https://www.lacentrale.fr/listing?makesModelsCommercialNames={marque}%3A{modele}&priceMax={prix_max}&priceMin={prix_min}&sortBy=date&sortOrder=desc&sellerType=private&options=&page=1"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "fr-FR,fr;q=0.9",
         }
-
-        url = (
-            f"https://www.lacentrale.fr/listing?"
-            f"makesModelsCommercialNames={marque}%3A{modele}"
-            f"&priceMax={prix_max}&priceMin={prix_min}&sortBy=date&page=1"
-        )
-
-        resp = requests.get(url, headers=headers, timeout=30)
-        print(f"[{horodatage()}] 🌐 LaCentrale status : {resp.status_code}")
-
-        if resp.status_code != 200:
-            print(f"[{horodatage()}] ⚠️ LaCentrale : échec ({resp.status_code})")
-            return annonces
-
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 La Centrale status : {resp.status_code}")
         soup = BeautifulSoup(resp.text, "html.parser")
-        cards = soup.select("a[href*='/auto-occasion/']")
-        print(f"[{horodatage()}] 📋 LaCentrale : {len(cards)} annonce(s)")
-
+        cards = soup.select("div[class*='searchCard']") or \
+                soup.select("article[class*='vehicle']") or \
+                soup.select("div[class*='vehicleCard']") or \
+                soup.select("a[href*='/voiture-occasion']")
+        print(f"[{horodatage()}] 📋 La Centrale : {len(cards)} carte(s)")
         for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
             try:
-                href = card.get("href", "")
+                titre = card.get_text(separator=" ", strip=True)[:80]
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
                 if not href:
                     continue
-                url_annonce = "https://www.lacentrale.fr" + href if href.startswith("/") else href
-                titre = card.get_text(separator=" ", strip=True)[:70]
+                url_annonce = href if href.startswith("http") else "https://www.lacentrale.fr" + href
                 annonce_id = "lc_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+
+                # Prix
+                prix_el = card.select_one("[class*='price']") or card.select_one("[class*='Price']")
+                prix_txt = prix_el.get_text(strip=True) if prix_el else "0"
+                prix = int("".join(filter(str.isdigit, prix_txt))) if any(c.isdigit() for c in prix_txt) else 0
+
+                # Localisation
+                loc_el = card.select_one("[class*='location']") or card.select_one("[class*='Location']")
+                loc = loc_el.get_text(strip=True) if loc_el else "France"
+
+                # Vendeur pro ?
+                pro = est_vendeur_pro(titre, loc)
 
                 annonces.append({
                     "id": annonce_id,
-                    "titre": titre or "Annonce LaCentrale",
+                    "titre": titre or "Annonce La Centrale",
+                    "prix": prix,
+                    "url": url_annonce,
+                    "localisation": loc,
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "La Centrale",
+                    "pro": pro,
+                })
+            except:
+                continue
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ La Centrale erreur : {e}")
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# AUTOSCOUT24 — trié par date, particuliers uniquement
+# ══════════════════════════════════════════════════════
+def scraper_autoscout(filtres):
+    annonces = []
+    try:
+        marque = filtres["marque"].lower()
+        modele = filtres["modele"].lower().replace("+", "%2B")
+        prix_max = filtres["prix_max"]
+        prix_min = filtres.get("prix_min", 0)
+        # sort=age = plus récentes en premier, private = particuliers
+        url = f"https://www.autoscout24.fr/lst/{marque}/{modele}?sort=age&desc=1&priceto={prix_max}&pricefrom={prix_min}&ustate=N%2CU&size=20&page=1&atype=C&ocs_listing=include"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 AutoScout24 status : {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("article[class*='cldt-summary']") or \
+                soup.select("div[class*='ListItem']") or \
+                soup.select("article") or \
+                soup.select("a[href*='/annonces/']")
+        print(f"[{horodatage()}] 📋 AutoScout24 : {len(cards)} carte(s)")
+        for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
+            try:
+                titre_el = card.select_one("h2") or card.select_one("h1") or card.select_one("[class*='title']")
+                titre = titre_el.get_text(strip=True) if titre_el else card.get_text(separator=" ", strip=True)[:60]
+                prix_el = card.select_one("[class*='price']") or card.select_one("[data-testid*='price']")
+                prix_txt = prix_el.get_text(strip=True) if prix_el else "0"
+                prix = int("".join(filter(str.isdigit, prix_txt))) if any(c.isdigit() for c in prix_txt) else 0
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
+                if not href:
+                    continue
+                url_annonce = href if href.startswith("http") else "https://www.autoscout24.fr" + href
+                loc_el = card.select_one("[class*='location']") or card.select_one("[class*='seller']")
+                loc = loc_el.get_text(strip=True) if loc_el else "France"
+                annonce_id = "as_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+                if prix > filtres["prix_max"] and prix > 0:
+                    continue
+
+                # Vendeur pro ?
+                pro = est_vendeur_pro(titre, loc)
+
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce AutoScout24",
+                    "prix": prix,
+                    "url": url_annonce,
+                    "localisation": loc[:40],
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "AutoScout24",
+                    "pro": pro,
+                })
+            except:
+                continue
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ AutoScout24 erreur : {e}")
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# PARUVENDU — particuliers uniquement
+# ══════════════════════════════════════════════════════
+def scraper_paruvendu(filtres):
+    annonces = []
+    try:
+        marque = filtres["marque"].lower()
+        modele = filtres["modele"].lower().replace("+", "-plus")
+        prix_max = filtres["prix_max"]
+        prix_min = filtres.get("prix_min", 0)
+        url = f"https://www.paruvendu.fr/auto-moto-bateau/voiture/{marque}/{modele}/?px1={prix_min}&px2={prix_max}&tp=1"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
+        resp = requests.get(url, headers=headers, timeout=20)
+        print(f"[{horodatage()}] 🔍 ParuVendu status : {resp.status_code}")
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("div[class*='annonce']") or \
+                soup.select("article") or \
+                soup.select("a[href*='/voiture/']")
+        print(f"[{horodatage()}] 📋 ParuVendu : {len(cards)} carte(s)")
+        for card in cards[:10]:
+            try:
+                href = card.get("href", "") or (card.select_one("a") or {}).get("href", "")
+                if not href or "voiture" not in href:
+                    continue
+                url_annonce = href if href.startswith("http") else "https://www.paruvendu.fr" + href
+                titre = card.get_text(separator=" ", strip=True)[:70]
+                annonce_id = "pv_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+                pro = est_vendeur_pro(titre, "")
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce ParuVendu",
                     "prix": 0,
                     "url": url_annonce,
                     "localisation": "France",
                     "annee": "N/A",
                     "km": "N/A",
-                    "source": "LaCentrale",
-                    "pro": False,
+                    "source": "ParuVendu",
+                    "pro": pro,
                 })
             except:
                 continue
-
     except Exception as e:
-        print(f"[{horodatage()}] ❌ LaCentrale erreur : {e}")
+        print(f"[{horodatage()}] ❌ ParuVendu erreur : {e}")
     return annonces
 
 # ══════════════════════════════════════════════════════
-# SCORING
+# SCORE — particuliers favorisés, pros pénalisés
 # ══════════════════════════════════════════════════════
 def calculer_score(annonce, filtres):
     score = 50
-    prix = annonce.get("prix", 0)
-    prix_max = filtres.get("prix_max", 1)
+    prix = annonce["prix"]
 
+    # Score prix
     if prix > 0:
-        ratio = prix / prix_max
-        if ratio < 0.7:
-            score += 30
-        elif ratio < 0.85:
-            score += 15
-        elif ratio < 0.95:
-            score += 5
-
-    if not annonce.get("pro"):
+        if prix < filtres["prix_max"] * 0.7:
+            score += 35
+        elif prix < filtres["prix_max"] * 0.85:
+            score += 20
+        elif prix < filtres["prix_max"] * 0.95:
+            score += 10
+    else:
         score += 10
 
-    km = annonce.get("km", "N/A")
-    if km != "N/A":
-        try:
-            km_int = int(str(km).replace(" ", "").replace("km", ""))
-            if km_int < 50000:
-                score += 10
-            elif km_int < 100000:
-                score += 5
-        except:
-            pass
+    # Bonus particulier / malus pro
+    if annonce.get("pro"):
+        score -= 20  # Pénalité vendeur pro
+    else:
+        score += 15  # Bonus particulier
 
-    return min(score, 100)
+    # Bonus localisation précise
+    if annonce["localisation"] and annonce["localisation"] != "France":
+        score += 5
 
-# ══════════════════════════════════════════════════════
-# SCAN PRINCIPAL
-# ══════════════════════════════════════════════════════
-def scanner(vus):
-    print(f"\n[{horodatage()}] 🔍 Démarrage du scan...")
+    # Bonus titre informatif
+    if annonce["titre"] and len(annonce["titre"]) > 10:
+        score += 5
 
-    for client in CLIENTS:
-        nom = client["nom"]
-        token = client["telegram_token"]
-        chat_id = client["telegram_chat_id"]
-        filtres = client["filtres"]
-
-        print(f"[{horodatage()}] 👤 Client : {nom}")
-
-        toutes_annonces = []
-        toutes_annonces += scraper_leboncoin(filtres)
-        toutes_annonces += scraper_lacentrale(filtres)
-
-        print(f"[{horodatage()}] 📦 Total annonces : {len(toutes_annonces)}")
-
-        nouvelles = 0
-        for annonce in toutes_annonces:
-            annonce_id = annonce["id"]
-            if annonce_id in vus:
-                continue
-
-            vus.add(annonce_id)
-            score = calculer_score(annonce, filtres)
-
-            if score >= CONFIG["SCORE_MIN"]:
-                envoyer_telegram(annonce, score, token, chat_id)
-                nouvelles += 1
-                time.sleep(1)
-
-        print(f"[{horodatage()}] ✅ {nouvelles} nouvelle(s) annonce(s) envoyée(s) pour {nom}")
-
-    sauvegarder_vus(vus)
+    return min(max(score, 0), 100)
 
 # ══════════════════════════════════════════════════════
-# MAIN
+# SCAN PAR CLIENT
 # ══════════════════════════════════════════════════════
-def main():
-    print(f"[{horodatage()}] 🚀 Trakar démarré")
+def scanner_client(client, vus):
+    nom = client["nom"]
+    filtres = client["filtres"]
+    token = client["telegram_token"]
+    chat_id = client["telegram_chat_id"]
+    nouvelles = 0
+
+    print(f"\n[{horodatage()}] 👤 Scan pour : {nom}")
+
+    toutes_annonces = []
+    toutes_annonces += scraper_lacentrale(filtres)
+    toutes_annonces += scraper_autoscout(filtres)
+    toutes_annonces += scraper_paruvendu(filtres)
+
+    # Trier : particuliers en premier, puis par score
+    toutes_annonces.sort(key=lambda x: (x.get("pro", False), -calculer_score(x, filtres)))
+
+    print(f"[{horodatage()}] 📊 {nom} : {len(toutes_annonces)} annonce(s) — {sum(1 for a in toutes_annonces if not a.get('pro'))} particuliers")
+
+    for annonce in toutes_annonces:
+        cle = f"{nom}_{annonce['id']}"
+        if cle in vus:
+            continue
+
+        score = calculer_score(annonce, filtres)
+        vendeur = "PARTICULIER" if not annonce.get("pro") else "pro"
+        print(f"[{horodatage()}] 🎯 {score}/100 [{vendeur}] — {annonce['titre'][:35]} — {annonce['source']}")
+
+        if score >= CONFIG["SCORE_MIN"]:
+            envoyer_telegram(annonce, score, token, chat_id)
+            nouvelles += 1
+
+        vus.add(cle)
+
+    return nouvelles
+
+def lancer_scan():
+    print(f"\n[{horodatage()}] ━━━ Nouveau scan — {len(CLIENTS)} client(s) ━━━")
     vus = charger_vus()
+    total_nouvelles = 0
+    for client in CLIENTS:
+        try:
+            nouvelles = scanner_client(client, vus)
+            total_nouvelles += nouvelles
+        except Exception as e:
+            print(f"[{horodatage()}] ❌ Erreur client {client['nom']} : {e}")
+    sauvegarder_vus(vus)
+    print(f"[{horodatage()}] ✅ Scan terminé — {total_nouvelles} alerte(s) envoyée(s)")
 
-    scanner(vus)
-
-    schedule.every(CONFIG["INTERVALLE_MINUTES"]).minutes.do(scanner, vus=vus)
-
+def demarrer():
+    print(f"🚗 TRAKAR PRO — Bot multi-clients démarré ({len(CLIENTS)} client(s))")
+    # Vider les vus au démarrage pour rescanner proprement
+    if os.path.exists(FICHIER_VUS):
+        os.remove(FICHIER_VUS)
+        print(f"[{horodatage()}] 🗑️ Cache vidé — nouveau départ propre")
+    lancer_scan()
+    schedule.every(CONFIG["INTERVALLE_MINUTES"]).minutes.do(lancer_scan)
     while True:
         schedule.run_pending()
         time.sleep(30)
 
 if __name__ == "__main__":
-    main()
+    demarrer()
