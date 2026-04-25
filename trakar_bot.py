@@ -116,97 +116,88 @@ def scraper_leboncoin(filtres):
         prix_max = filtres["prix_max"]
         prix_min = filtres.get("prix_min", 0)
 
-        url = (
-            f"https://www.leboncoin.fr/recherche?"
-            f"category=2&text={marque}+{modele}"
-            f"&price={prix_min}-{prix_max}"
-            f"&owner_type=private"
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Content-Type": "application/json",
+            "api_key": "ba0c2dad52b3565c9a5143b30b3c0e95",
+        }
+
+        payload = {
+            "filters": {
+                "category": {"id": "2"},
+                "enums": {"ad_type": ["offer"]},
+                "keywords": {"text": f"{marque} {modele}"},
+                "ranges": {
+                    "price": {"min": prix_min, "max": prix_max}
+                }
+            },
+            "limit": 20,
+            "sort_by": "time",
+            "sort_order": "desc",
+        }
+
+        resp = requests.post(
+            "https://api.leboncoin.fr/api/adfinder/v1/search",
+            headers=headers,
+            json=payload,
+            timeout=30
         )
 
-        resp = scraper_url(url, render=True)
-        if not resp or resp.status_code != 200:
-            print(f"[{horodatage()}] ⚠️ LeBonCoin : échec scraping")
+        print(f"[{horodatage()}] 🌐 LeBonCoin API status : {resp.status_code}")
+
+        if resp.status_code != 200:
+            print(f"[{horodatage()}] ⚠️ LeBonCoin : échec API")
             return annonces
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        data = resp.json()
+        ads = data.get("ads", [])
+        print(f"[{horodatage()}] 📋 LeBonCoin : {len(ads)} annonce(s)")
 
-        script = soup.find("script", {"id": "__NEXT_DATA__"})
-        if script:
-            data = json.loads(script.string)
-            ads = (data.get("props", {})
-                      .get("pageProps", {})
-                      .get("searchData", {})
-                      .get("ads", []))
-            print(f"[{horodatage()}] 📋 LeBonCoin : {len(ads)} annonce(s) JSON")
-            for ad in ads[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
-                try:
-                    titre = ad.get("subject", "Annonce LeBonCoin")
-                    prix = ad.get("price", [0])
-                    prix = prix[0] if isinstance(prix, list) and prix else 0
-                    url_annonce = "https://www.leboncoin.fr" + ad.get("url", "")
-                    loc = ad.get("location", {})
-                    localisation = f"{loc.get('city', '')} ({loc.get('zipcode', '')})"
-                    annonce_id = "lbc_" + str(ad.get("list_id", hashlib.md5(url_annonce.encode()).hexdigest()[:10]))
+        for ad in ads:
+            try:
+                titre = ad.get("subject", "Annonce LeBonCoin")
+                prix_list = ad.get("price", [0])
+                prix = prix_list[0] if isinstance(prix_list, list) and prix_list else 0
+                url_annonce = "https://www.leboncoin.fr" + ad.get("url", "")
+                loc = ad.get("location", {})
+                localisation = f"{loc.get('city', '')} ({loc.get('zipcode', '')})"
+                annonce_id = "lbc_" + str(ad.get("list_id", hashlib.md5(url_annonce.encode()).hexdigest()[:10]))
 
-                    attrs = {a["key"]: a.get("value_label", a.get("value", ""))
-                             for a in ad.get("attributes", [])}
-                    annee = attrs.get("regdate", "N/A")
-                    km = attrs.get("mileage", "N/A")
+                attrs = {a["key"]: a.get("value_label", a.get("value", ""))
+                         for a in ad.get("attributes", [])}
+                annee = attrs.get("regdate", "N/A")
+                km = attrs.get("mileage", "N/A")
+                pro = ad.get("owner", {}).get("type", "") == "pro"
 
-                    pro = ad.get("owner", {}).get("type", "") == "pro"
-
-                    annonces.append({
-                        "id": annonce_id,
-                        "titre": titre,
-                        "prix": prix,
-                        "url": url_annonce,
-                        "localisation": localisation,
-                        "annee": annee,
-                        "km": km,
-                        "source": "LeBonCoin",
-                        "pro": pro,
-                    })
-                except:
-                    continue
-        else:
-            cards = soup.select("a[href*='/voitures/offres/']")
-            print(f"[{horodatage()}] 📋 LeBonCoin HTML : {len(cards)} carte(s)")
-            for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
-                try:
-                    href = card.get("href", "")
-                    if not href:
-                        continue
-                    url_annonce = "https://www.leboncoin.fr" + href
-                    titre = card.get_text(separator=" ", strip=True)[:70]
-                    annonce_id = "lbc_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
-                    annonces.append({
-                        "id": annonce_id,
-                        "titre": titre or "Annonce LeBonCoin",
-                        "prix": 0,
-                        "url": url_annonce,
-                        "localisation": "France",
-                        "annee": "N/A",
-                        "km": "N/A",
-                        "source": "LeBonCoin",
-                        "pro": False,
-                    })
-                except:
-                    continue
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre,
+                    "prix": prix,
+                    "url": url_annonce,
+                    "localisation": localisation,
+                    "annee": annee,
+                    "km": km,
+                    "source": "LeBonCoin",
+                    "pro": pro,
+                })
+            except:
+                continue
 
     except Exception as e:
         print(f"[{horodatage()}] ❌ LeBonCoin erreur : {e}")
     return annonces
 
 # ══════════════════════════════════════════════════════
-# LA CENTRALE
+# LACENTRALE
 # ══════════════════════════════════════════════════════
 def scraper_lacentrale(filtres):
     annonces = []
     try:
-        marque = filtres["marque"].upper()
-        modele = filtres["modele"].replace("+", "-plus")
+        marque = filtres["marque"]
+        modele = filtres["modele"]
         prix_max = filtres["prix_max"]
         prix_min = filtres.get("prix_min", 0)
+
         url = (
             f"https://www.lacentrale.fr/listing?"
             f"makesModelsCommercialNames={marque}%3A{modele}"
