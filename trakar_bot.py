@@ -29,13 +29,13 @@ RECHERCHES = [
     },
 ]
 
-INTERVALLE_SECONDES = 300  # Vérifie toutes les 5 minutes
+INTERVALLE_SECONDES = 300
 
-# ============================================
-# STOCKAGE DES ANNONCES DÉJÀ VUES
-# ============================================
 annonces_vues = set()
 
+# ============================================
+# SAUVEGARDE
+# ============================================
 def charger_annonces_vues():
     try:
         with open("annonces_vues.json", "r") as f:
@@ -60,19 +60,21 @@ def envoyer_telegram(message):
     }
     try:
         requests.post(url, data=data, timeout=10)
-        print(f"✅ Message Telegram envoyé")
+        print("✅ Message Telegram envoyé")
     except Exception as e:
         print(f"❌ Erreur Telegram : {e}")
 
 # ============================================
-# SCRAPING CRAIGSLIST
+# SCRAPING
 # ============================================
 def scraper_craigslist(recherche):
     ville = recherche["ville"]
     url = f"https://{ville}.craigslist.org/search/cta"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
 
     params = {
@@ -80,60 +82,75 @@ def scraper_craigslist(recherche):
         "max_price": recherche["prix_max"],
         "min_price": recherche["prix_min"],
         "auto_year_min": recherche.get("annee_min", 2005),
-        "sort": "date",  # Les plus récentes en premier
+        "sort": "date",
     }
 
     try:
         response = requests.get(url, headers=headers, params=params, timeout=15)
         print(f"📡 Status: {response.status_code} pour {recherche['nom']}")
 
-        if response.status_code != 200:
-            print(f"❌ Erreur HTTP {response.status_code}")
-            return []
-
         soup = BeautifulSoup(response.text, "html.parser")
-
-        annonces = soup.find_all("li", class_="cl-search-result")
-        print(f"🔍 {len(annonces)} annonces trouvées pour {recherche['nom']}")
-
         resultats = []
 
+        # Méthode 1 - result-row
+        annonces = soup.find_all("li", class_=lambda c: c and "result-row" in c)
+        print(f"📋 Méthode 1 (result-row) : {len(annonces)}")
+
+        # Méthode 2 - cl-search-result
+        if not annonces:
+            annonces = soup.select("li.cl-search-result")
+            print(f"📋 Méthode 2 (cl-search-result) : {len(annonces)}")
+
+        # Méthode 3 - cl-static-search-result
+        if not annonces:
+            annonces = soup.select(".cl-static-search-result")
+            print(f"📋 Méthode 3 (cl-static-search-result) : {len(annonces)}")
+
+        # Méthode 4 - liens /cto/
+        if not annonces:
+            liens = soup.find_all("a", href=lambda h: h and "/cto/" in h)
+            print(f"📋 Méthode 4 (liens /cto/) : {len(liens)}")
+            for lien_tag in liens:
+                titre = lien_tag.get_text(strip=True)
+                lien = lien_tag.get("href", "")
+                if titre and lien:
+                    resultats.append({
+                        "titre": titre,
+                        "prix": "Non précisé",
+                        "lien": lien,
+                        "lieu": "Los Angeles",
+                    })
+            return resultats
+
+        # Traitement des annonces trouvées
         for annonce in annonces:
             try:
-                # Titre et lien
-                lien_tag = annonce.find("a", class_="cl-app-anchor")
+                lien_tag = annonce.find("a")
                 if not lien_tag:
                     continue
 
                 titre = lien_tag.get_text(strip=True)
                 lien = lien_tag.get("href", "")
 
-                # Prix
-                prix_tag = annonce.find("span", class_="priceinfo")
-                if not prix_tag:
-                    continue
-                prix_texte = prix_tag.get_text(strip=True)
-                prix = int(prix_texte.replace("$", "").replace(",", "").strip())
+                prix_tag = annonce.find(class_=lambda c: c and "price" in str(c).lower())
+                prix = prix_tag.get_text(strip=True) if prix_tag else "Non précisé"
 
-                # Localisation
-                lieu_tag = annonce.find("div", class_="supertitle")
+                lieu_tag = annonce.find(class_=lambda c: c and (
+                    "hood" in str(c) or "location" in str(c) or "meta" in str(c)
+                ))
                 lieu = lieu_tag.get_text(strip=True) if lieu_tag else "Non précisé"
-
-                # Date
-                date_tag = annonce.find("div", class_="meta")
-                date = date_tag.get_text(strip=True) if date_tag else ""
 
                 resultats.append({
                     "titre": titre,
                     "prix": prix,
                     "lien": lien,
                     "lieu": lieu,
-                    "date": date,
                 })
 
             except Exception as e:
                 continue
 
+        print(f"🔎 Total annonces extraites : {len(resultats)}")
         return resultats
 
     except Exception as e:
@@ -141,36 +158,32 @@ def scraper_craigslist(recherche):
         return []
 
 # ============================================
-# ANALYSE ET ALERTE
+# ALERTES
 # ============================================
 def analyser_et_alerter(annonces, recherche):
     nouvelles = 0
 
     for annonce in annonces:
         lien = annonce["lien"]
-
-        # Déjà vue ?
         if lien in annonces_vues:
             continue
 
         annonces_vues.add(lien)
         nouvelles += 1
 
-        # Construire le message Telegram
         message = (
             f"🚗 <b>NOUVELLE ANNONCE</b>\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"📌 <b>{annonce['titre']}</b>\n"
-            f"💰 <b>{annonce['prix']}$</b>\n"
+            f"💰 <b>{annonce['prix']}</b>\n"
             f"📍 {annonce['lieu']}\n"
-            f"🕐 {annonce['date']}\n"
             f"🔗 <a href='{annonce['lien']}'>Voir l'annonce</a>\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"🔎 Recherche : {recherche['nom']}"
         )
 
         envoyer_telegram(message)
-        time.sleep(1)  # Pause entre chaque message
+        time.sleep(1)
 
     return nouvelles
 
@@ -188,12 +201,11 @@ def main():
     envoyer_telegram(
         "🚀 <b>Bot Craigslist démarré !</b>\n"
         f"🔍 {len(RECHERCHES)} recherche(s) active(s)\n"
-        f"⏱️ Vérification toutes les {INTERVALLE_SECONDES//60} minutes"
+        f"⏱️ Vérification toutes les {INTERVALLE_SECONDES // 60} minutes"
     )
 
     while True:
         print(f"\n⏰ [{datetime.now().strftime('%H:%M:%S')}] Nouvelle vérification...")
-
         total_nouvelles = 0
 
         for recherche in RECHERCHES:
@@ -205,13 +217,13 @@ def main():
                 total_nouvelles += nouvelles
                 print(f"✅ {nouvelles} nouvelle(s) annonce(s)")
             else:
-                print(f"⚠️ Aucune annonce récupérée")
+                print("⚠️ Aucune annonce récupérée")
 
-            time.sleep(5)  # Pause entre chaque recherche
+            time.sleep(5)
 
         sauvegarder_annonces_vues()
-        print(f"\n💾 Sauvegarde effectuée — {total_nouvelles} nouvelle(s) au total")
-        print(f"⏳ Prochaine vérification dans {INTERVALLE_SECONDES//60} minutes...")
+        print(f"\n💾 Sauvegarde — {total_nouvelles} nouvelle(s) au total")
+        print(f"⏳ Prochaine vérification dans {INTERVALLE_SECONDES // 60} minutes...")
         time.sleep(INTERVALLE_SECONDES)
 
 if __name__ == "__main__":
