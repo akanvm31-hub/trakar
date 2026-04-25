@@ -10,8 +10,6 @@ from bs4 import BeautifulSoup
 # ══════════════════════════════════════════════════════
 # CONFIGURATION
 # ══════════════════════════════════════════════════════
-SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
-
 CLIENTS = [
     {
         "nom": "Karamba (test)",
@@ -59,24 +57,6 @@ def est_vendeur_pro(titre, localisation):
     texte = (titre + " " + localisation).lower()
     return any(mot in texte for mot in MOTS_PRO)
 
-def scraper_url(url, render=False):
-    try:
-        resp = requests.get(
-            "http://api.scraperapi.com",
-            params={
-                "api_key": SCRAPER_API_KEY,
-                "url": url,
-                "render": "true" if render else "false",
-                "country_code": "fr",
-            },
-            timeout=60
-        )
-        print(f"[{horodatage()}] 🌐 ScraperAPI status : {resp.status_code} — {url[:60]}")
-        return resp
-    except Exception as e:
-        print(f"[{horodatage()}] ❌ ScraperAPI erreur : {e}")
-        return None
-
 # ══════════════════════════════════════════════════════
 # TELEGRAM
 # ══════════════════════════════════════════════════════
@@ -117,7 +97,10 @@ def scraper_leboncoin(filtres):
         prix_min = filtres.get("prix_min", 0)
 
         headers = {
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+            "Referer": "https://www.leboncoin.fr/",
             "Content-Type": "application/json",
             "api_key": "ba0c2dad52b3565c9a5143b30b3c0e95",
         }
@@ -143,10 +126,10 @@ def scraper_leboncoin(filtres):
             timeout=30
         )
 
-        print(f"[{horodatage()}] 🌐 LeBonCoin API status : {resp.status_code}")
+        print(f"[{horodatage()}] 🌐 LeBonCoin status : {resp.status_code}")
 
         if resp.status_code != 200:
-            print(f"[{horodatage()}] ⚠️ LeBonCoin : échec API")
+            print(f"[{horodatage()}] ⚠️ LeBonCoin : échec ({resp.status_code})")
             return annonces
 
         data = resp.json()
@@ -155,19 +138,14 @@ def scraper_leboncoin(filtres):
 
         for ad in ads:
             try:
-                titre = ad.get("subject", "Annonce LeBonCoin")
+                titre = ad.get("subject", "Annonce")
                 prix_list = ad.get("price", [0])
                 prix = prix_list[0] if isinstance(prix_list, list) and prix_list else 0
                 url_annonce = "https://www.leboncoin.fr" + ad.get("url", "")
                 loc = ad.get("location", {})
                 localisation = f"{loc.get('city', '')} ({loc.get('zipcode', '')})"
                 annonce_id = "lbc_" + str(ad.get("list_id", hashlib.md5(url_annonce.encode()).hexdigest()[:10]))
-
-                attrs = {a["key"]: a.get("value_label", a.get("value", ""))
-                         for a in ad.get("attributes", [])}
-                annee = attrs.get("regdate", "N/A")
-                km = attrs.get("mileage", "N/A")
-                pro = ad.get("owner", {}).get("type", "") == "pro"
+                attrs = {a["key"]: a.get("value_label", a.get("value", "")) for a in ad.get("attributes", [])}
 
                 annonces.append({
                     "id": annonce_id,
@@ -175,10 +153,10 @@ def scraper_leboncoin(filtres):
                     "prix": prix,
                     "url": url_annonce,
                     "localisation": localisation,
-                    "annee": annee,
-                    "km": km,
+                    "annee": attrs.get("regdate", "N/A"),
+                    "km": attrs.get("mileage", "N/A"),
                     "source": "LeBonCoin",
-                    "pro": pro,
+                    "pro": ad.get("owner", {}).get("type", "") == "pro",
                 })
             except:
                 continue
@@ -193,21 +171,28 @@ def scraper_leboncoin(filtres):
 def scraper_lacentrale(filtres):
     annonces = []
     try:
-        marque = filtres["marque"]
-        modele = filtres["modele"]
+        marque = filtres["marque"].upper()
+        modele = filtres["modele"].upper()
         prix_max = filtres["prix_max"]
         prix_min = filtres.get("prix_min", 0)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "fr-FR,fr;q=0.9",
+        }
 
         url = (
             f"https://www.lacentrale.fr/listing?"
             f"makesModelsCommercialNames={marque}%3A{modele}"
-            f"&priceMax={prix_max}&priceMin={prix_min}"
-            f"&sortBy=date&page=1"
+            f"&priceMax={prix_max}&priceMin={prix_min}&sortBy=date&page=1"
         )
 
-        resp = scraper_url(url, render=True)
-        if not resp or resp.status_code != 200:
-            print(f"[{horodatage()}] ⚠️ LaCentrale : échec scraping")
+        resp = requests.get(url, headers=headers, timeout=30)
+        print(f"[{horodatage()}] 🌐 LaCentrale status : {resp.status_code}")
+
+        if resp.status_code != 200:
+            print(f"[{horodatage()}] ⚠️ LaCentrale : échec ({resp.status_code})")
             return annonces
 
         soup = BeautifulSoup(resp.text, "html.parser")
