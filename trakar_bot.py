@@ -29,7 +29,7 @@ CLIENTS = [
 
 CONFIG = {
     "INTERVALLE_MINUTES": 5,
-    "SCORE_MIN": 60,
+    "SCORE_MIN": 0,
     "MAX_ANNONCES_PAR_SCAN": 20,
     "MAX_AGE_HEURES": 24,  # On ignore les annonces de plus de 24h
 }
