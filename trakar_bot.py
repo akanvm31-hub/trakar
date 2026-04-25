@@ -60,7 +60,6 @@ def est_vendeur_pro(titre, localisation):
     return any(mot in texte for mot in MOTS_PRO)
 
 def scraper_url(url, render=False):
-    """Requête via ScraperAPI"""
     try:
         resp = requests.get(
             "http://api.scraperapi.com",
@@ -107,7 +106,7 @@ def envoyer_telegram(annonce, score, token, chat_id):
         print(f"[{horodatage()}] ❌ Telegram exception : {e}")
 
 # ══════════════════════════════════════════════════════
-# LEBONCOIN — via ScraperAPI
+# LEBONCOIN
 # ══════════════════════════════════════════════════════
 def scraper_leboncoin(filtres):
     annonces = []
@@ -131,7 +130,6 @@ def scraper_leboncoin(filtres):
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Cherche les annonces dans le JSON embarqué
         script = soup.find("script", {"id": "__NEXT_DATA__"})
         if script:
             data = json.loads(script.string)
@@ -149,8 +147,8 @@ def scraper_leboncoin(filtres):
                     loc = ad.get("location", {})
                     localisation = f"{loc.get('city', '')} ({loc.get('zipcode', '')})"
                     annonce_id = "lbc_" + str(ad.get("list_id", hashlib.md5(url_annonce.encode()).hexdigest()[:10]))
-                    
-                    attrs = {a["key"]: a.get("value_label", a.get("value", "")) 
+
+                    attrs = {a["key"]: a.get("value_label", a.get("value", ""))
                              for a in ad.get("attributes", [])}
                     annee = attrs.get("regdate", "N/A")
                     km = attrs.get("mileage", "N/A")
@@ -171,7 +169,6 @@ def scraper_leboncoin(filtres):
                 except:
                     continue
         else:
-            # Fallback HTML
             cards = soup.select("a[href*='/voitures/offres/']")
             print(f"[{horodatage()}] 📋 LeBonCoin HTML : {len(cards)} carte(s)")
             for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
@@ -214,4 +211,130 @@ def scraper_lacentrale(filtres):
             f"https://www.lacentrale.fr/listing?"
             f"makesModelsCommercialNames={marque}%3A{modele}"
             f"&priceMax={prix_max}&priceMin={prix_min}"
-            f"&sortBy=date
+            f"&sortBy=date&page=1"
+        )
+
+        resp = scraper_url(url, render=True)
+        if not resp or resp.status_code != 200:
+            print(f"[{horodatage()}] ⚠️ LaCentrale : échec scraping")
+            return annonces
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("a[href*='/auto-occasion/']")
+        print(f"[{horodatage()}] 📋 LaCentrale : {len(cards)} annonce(s)")
+
+        for card in cards[:CONFIG["MAX_ANNONCES_PAR_SCAN"]]:
+            try:
+                href = card.get("href", "")
+                if not href:
+                    continue
+                url_annonce = "https://www.lacentrale.fr" + href if href.startswith("/") else href
+                titre = card.get_text(separator=" ", strip=True)[:70]
+                annonce_id = "lc_" + hashlib.md5(url_annonce.encode()).hexdigest()[:10]
+
+                annonces.append({
+                    "id": annonce_id,
+                    "titre": titre or "Annonce LaCentrale",
+                    "prix": 0,
+                    "url": url_annonce,
+                    "localisation": "France",
+                    "annee": "N/A",
+                    "km": "N/A",
+                    "source": "LaCentrale",
+                    "pro": False,
+                })
+            except:
+                continue
+
+    except Exception as e:
+        print(f"[{horodatage()}] ❌ LaCentrale erreur : {e}")
+    return annonces
+
+# ══════════════════════════════════════════════════════
+# SCORING
+# ══════════════════════════════════════════════════════
+def calculer_score(annonce, filtres):
+    score = 50
+    prix = annonce.get("prix", 0)
+    prix_max = filtres.get("prix_max", 1)
+
+    if prix > 0:
+        ratio = prix / prix_max
+        if ratio < 0.7:
+            score += 30
+        elif ratio < 0.85:
+            score += 15
+        elif ratio < 0.95:
+            score += 5
+
+    if not annonce.get("pro"):
+        score += 10
+
+    km = annonce.get("km", "N/A")
+    if km != "N/A":
+        try:
+            km_int = int(str(km).replace(" ", "").replace("km", ""))
+            if km_int < 50000:
+                score += 10
+            elif km_int < 100000:
+                score += 5
+        except:
+            pass
+
+    return min(score, 100)
+
+# ══════════════════════════════════════════════════════
+# SCAN PRINCIPAL
+# ══════════════════════════════════════════════════════
+def scanner(vus):
+    print(f"\n[{horodatage()}] 🔍 Démarrage du scan...")
+
+    for client in CLIENTS:
+        nom = client["nom"]
+        token = client["telegram_token"]
+        chat_id = client["telegram_chat_id"]
+        filtres = client["filtres"]
+
+        print(f"[{horodatage()}] 👤 Client : {nom}")
+
+        toutes_annonces = []
+        toutes_annonces += scraper_leboncoin(filtres)
+        toutes_annonces += scraper_lacentrale(filtres)
+
+        print(f"[{horodatage()}] 📦 Total annonces : {len(toutes_annonces)}")
+
+        nouvelles = 0
+        for annonce in toutes_annonces:
+            annonce_id = annonce["id"]
+            if annonce_id in vus:
+                continue
+
+            vus.add(annonce_id)
+            score = calculer_score(annonce, filtres)
+
+            if score >= CONFIG["SCORE_MIN"]:
+                envoyer_telegram(annonce, score, token, chat_id)
+                nouvelles += 1
+                time.sleep(1)
+
+        print(f"[{horodatage()}] ✅ {nouvelles} nouvelle(s) annonce(s) envoyée(s) pour {nom}")
+
+    sauvegarder_vus(vus)
+
+# ══════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════
+def main():
+    print(f"[{horodatage()}] 🚀 Trakar démarré")
+    vus = charger_vus()
+
+    scanner(vus)
+
+    schedule.every(CONFIG["INTERVALLE_MINUTES"]).minutes.do(scanner, vus=vus)
+
+    while True:
+        schedule.run_pending()
+        time.sleep(30)
+
+if __name__ == "__main__":
+    main()
